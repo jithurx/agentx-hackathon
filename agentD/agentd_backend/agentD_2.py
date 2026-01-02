@@ -11,6 +11,7 @@ from langgraph.prebuilt import ToolNode
 from .terminal_tool import execute_shell_command
 from .zapier_tools import initialize_and_get_mcp_tools 
 from .file_tools import get_file_tools, create_file, write_file, read_file, replace_in_file, delete_file
+from .browse_cloud_tool import browse_web_cloud
 from .prompts import SYSTEM_PROMPT
 import re
 import os
@@ -140,6 +141,7 @@ async def initialize_agent():
     # Combine all tools
     all_tools = [execute_shell_command]
     all_tools.extend(get_file_tools())
+    all_tools.append(browse_web_cloud)
     
     # Only add Zapier tools if they were successfully initialized
     if zapier_tools_list:
@@ -197,12 +199,21 @@ async def initialize_agent():
     
     return _agent
 
-async def invoke_agent(message: str, config: dict) -> dict:
-    """Invoke the agent with a message and return the response."""
+async def invoke_agent(message: str, config: dict):
+    """Invoke the agent with a message and yield progress and response."""
     global _agent
     
     if _agent is None:
         _agent = await initialize_agent()
+
+    # Generate progress steps
+    from .progress_gemini import generate_progress_steps
+    progress_steps = generate_progress_steps(message, max_steps=6)
+    
+    # Yield progress steps
+    for i, step in enumerate(progress_steps, 1):
+        yield {"type": "progress", "step": i, "total": len(progress_steps), "message": step}
+        await asyncio.sleep(0.5)  # Small delay for real-time feel
 
     initial_message_content = f"{SYSTEM_PROMPT}\n\nUser request: {message}"
     
@@ -210,7 +221,18 @@ async def invoke_agent(message: str, config: dict) -> dict:
         "messages": [HumanMessage(content=initial_message_content)],
     }, config=config)
     print(result["messages"][-1])
-    return result
+    
+    # Yield final result
+    final_message = result["messages"][-1]
+    response_content = ""
+    if isinstance(final_message, AIMessage):
+        response_content = final_message.content if hasattr(final_message, "content") else str(final_message)
+    elif isinstance(final_message, ToolMessage):
+        response_content = f"Agent executed tool. Output: {final_message.content if hasattr(final_message, 'content') else str(final_message)}"
+    else:
+        response_content = str(final_message)
+    
+    yield {"type": "response", "content": response_content}
 
 async def summarize_chat_history(messages: list) -> str:
     """Summarize the chat history."""

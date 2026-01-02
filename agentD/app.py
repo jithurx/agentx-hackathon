@@ -1,5 +1,6 @@
 from fastapi import FastAPI, Request, HTTPException, Depends
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
+import json
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from fastapi.middleware.cors import CORSMiddleware
@@ -154,37 +155,26 @@ async def log_metrics_endpoint():
 
 @app.post("/api/chat")
 async def chat_endpoint(payload: Dict[str, Any]):
-    """Handle chat messages from the frontend."""
+    """Handle chat messages from the frontend with streaming progress."""
     session_id = payload.get("session_id")
     user_message_content = payload.get("message")
 
     if not session_id or not user_message_content:
         raise HTTPException(status_code=400, detail="Missing session_id or message in request.")
 
-    try:
-        config = {"configurable": {"thread_id": session_id}}
-        result = await invoke_agent(user_message_content, config)
+    async def event_generator():
+        try:
+            config = {"configurable": {"thread_id": session_id}}
+            async for event in invoke_agent(user_message_content, config):
+                if event["type"] == "progress":
+                    yield f"data: {json.dumps({'type': 'progress', 'step': event['step'], 'total': event['total'], 'message': event['message']})}\n\n"
+                elif event["type"] == "response":
+                    yield f"data: {json.dumps({'type': 'response', 'content': event['content']})}\n\n"
+        except Exception as e:
+            print(f"Error invoking agent: {e}")
+            yield f"data: {json.dumps({'type': 'error', 'message': str(e)})}\n\n"
 
-        if not result or "messages" not in result or not result["messages"]:
-            raise HTTPException(status_code=500, detail="No response received from agent")
-
-        final_message = result["messages"][-1]
-        if final_message is None:
-            raise HTTPException(status_code=500, detail="Empty response from agent")
-
-        response_content = ""
-        if isinstance(final_message, AIMessage):
-            response_content = final_message.content if hasattr(final_message, "content") else str(final_message)
-        elif isinstance(final_message, ToolMessage):
-            response_content = f"Agent executed tool. Output: {final_message.content if hasattr(final_message, 'content') else str(final_message)}"
-        else:
-            response_content = str(final_message)
-
-        return JSONResponse(content={"response": response_content})
-
-    except Exception as e:
-        print(f"Error invoking agent: {e}")
-        raise HTTPException(status_code=500, detail=f"Error processing chat: {str(e)}")
+    return StreamingResponse(event_generator(), media_type="text/event-stream")
 
 @app.post("/api/summarize_chat")
 async def summarize_chat(request: Dict[str, Any]):
